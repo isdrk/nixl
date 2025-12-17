@@ -1,0 +1,13 @@
+ARG image_ver
+
+FROM ${image_ver}
+ARG nixl_install_dir
+ENV TZ=Etc/UTC
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-c"]
+
+COPY .ci/scripts/ /.ci/scripts/
+COPY .gitlab/build.sh .gitlab/build.sh
+RUN chmod +x .gitlab/build.sh
+
+RUN .gitlab/build.sh ${nixl_install_dir}
