@@ -310,6 +310,11 @@ xferBenchNixlWorker::xferBenchNixlWorker(int *argc, char ***argv, std::vector<st
 }
 
 xferBenchNixlWorker::~xferBenchNixlWorker() {
+// Destroy etcd/gRPC runtime first, while gRPC's PosixEventEngine
+    // is in a clean state (no concurrent heavy cleanup from UCCL).
+    delete rt;
+    rt = nullptr;
+
     if (agent) {
         delete agent;
         agent = nullptr;
