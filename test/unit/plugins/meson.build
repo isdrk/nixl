@@ -111,3 +111,10 @@ if enabled_plugins.get('OBJ')
         subdir('object')
     endif
 endif
+
+# DOCA_MEMOS tests run with mocked DOCA dependencies, so they don't need a
+# real libdoca_kv installed; they're still gated on the plugin being enabled
+# so disabling DOCA_MEMOS doesn't surface unrelated failures.
+if enabled_plugins.get('DOCA_MEMOS')
+    subdir('doca_memos')
+endif
