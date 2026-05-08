@@ -17,7 +17,7 @@ limitations under the License.
 
 # NIXL DOCA_MEMOS Plugin
 
-A NIXL backend plugin that provides hardware-accelerated key-value storage operations using NVIDIA's DOCA KV library (`libdoca_kv`, headers such as `doca_kv.h`) for BlueField devices. The NIXL backend name is **DOCA_MEMOS**; the underlying DOCA package may be renamed in the future.
+A NIXL backend plugin that provides hardware-accelerated key-value storage operations using NVIDIA's DOCA KV library (`libdoca_kv`, headers `doca_kvdev.h`, `doca_kvdev_io.h`, `doca_nvme_kernel_kvdev.h`, `doca_nvme_kernel_kvdev_io.h`) for BlueField devices. The NIXL backend name is **DOCA_MEMOS**; the underlying DOCA package may be renamed in the future.
 
 ## Overview
 
@@ -45,9 +45,7 @@ The DOCA_MEMOS plugin enables high-performance key-value operations (store, retr
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `num_tasks` | Maximum number of concurrent tasks in the DOCA task pool (clamped to `doca_kvdev_get_max_tasks()`) | `8192` |
-| `subnqn` | NVMe subsystem NQN passed to `doca_nvme_kernel_kvdev_add_ns()` | `nqn.2025-10.nvda.doca` |
-| `ns_id` | NVMe namespace ID passed to `doca_nvme_kernel_kvdev_add_ns()` | `1` |
-| `nguid` | 32-character hex NVMe namespace GUID | all zeros |
+| `nguid` | 32-character hex NVMe namespace NGUID passed to `doca_kvdev_set_nguid()` | all zeros |
 | `query_mem_mode` | Controls `queryMem()` behavior: `assume_success` returns success for every descriptor without querying the device; `actual` issues real DOCA EXIST operations | `assume_success` |
 | `ignore_read_not_found` | When `true`, retrieve operations on missing keys complete successfully (buffer contents are undefined) instead of failing with `NIXL_ERR_BACKEND` | `false` |
 
@@ -92,8 +90,9 @@ agent.createBackend("DOCA_MEMOS", params);
 The plugin manages the following DOCA resources:
 
 - **Progress Engine (PE)**: Handles task submission and completion polling
-- **KV Device (kvdev)**: Represents the NVMe KV device
-- **KV IO Context (kvIo)**: Manages task queues and completions
+- **NVMe Kernel KV Device (nvmeKvdev)**: Backend-specific NVMe-kernel KV device (path + NGUID configured before start)
+- **Generic KV Device (kvdev)**: View of the NVMe kernel KV device through the `doca_kvdev` API for capability queries
+- **NVMe Kernel KV IO Context (kkvIo) / Generic KV IO Context (kvIo)**: Per-engine I/O context; configured via `doca_kvdev_io_set_num_tasks()`, `doca_kvdev_io_set_task_completion_cb()`, and `doca_kvdev_io_set_task_error_cb()` before start
 - **Context (ctx)**: DOCA context connected to the progress engine
 
 All DOCA resources are initialized in the constructor and cleaned up in the destructor following RAII principles.

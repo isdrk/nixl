@@ -36,10 +36,12 @@ union doca_data;
 
 // Forward declarations for DOCA types
 struct doca_pe;
-struct doca_kvdev_io;
 struct doca_kvdev;
+struct doca_kvdev_io;
+struct doca_nvme_kernel_kvdev;
+struct doca_nvme_kernel_kvdev_io;
 struct doca_ctx;
-struct doca_kv_task;
+struct doca_task;
 // Forward declaration for request handle
 class nixlDocaMemosBackendReqH;
 
@@ -80,7 +82,7 @@ public:
     queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const = 0;
 
 protected:
-    nixlDocaMemosProgressEngine(struct doca_kvdev *kvdev, uint32_t num_tasks);
+    nixlDocaMemosProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev, uint32_t num_tasks);
     void
     cleanupDocaResources();
     bool
@@ -104,17 +106,18 @@ protected:
     // members so they can touch nixlDocaMemosBackendReqH's private bookkeeping
     // through the friendship granted to nixlDocaMemosProgressEngine.
     static void
-    taskCompletionCallback(struct doca_kv_task *kv_task,
+    taskCompletionCallback(struct doca_task *task,
                            union doca_data task_user_data,
                            union doca_data ctx_user_data);
     static void
-    taskErrorCallback(struct doca_kv_task *kv_task,
+    taskErrorCallback(struct doca_task *task,
                       union doca_data task_user_data,
                       union doca_data ctx_user_data);
     static void
     handleSubmissionFailure(nixlDocaMemosBackendReqH *req_h, nixl_status_t status);
 
     struct doca_pe *pe_ = nullptr;
+    struct doca_nvme_kernel_kvdev_io *kkvIo_ = nullptr;
     struct doca_kvdev_io *kvIo_ = nullptr;
     struct doca_ctx *ctx_ = nullptr;
 
@@ -129,7 +132,7 @@ protected:
  */
 class nixlNoThreadProgressEngine : public nixlDocaMemosProgressEngine {
 public:
-    nixlNoThreadProgressEngine(struct doca_kvdev *kvdev, uint32_t num_tasks);
+    nixlNoThreadProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev, uint32_t num_tasks);
     ~nixlNoThreadProgressEngine() override;
 
     nixl_status_t
@@ -158,7 +161,7 @@ private:
  * @brief Threaded progress engine — lock-free hot path.
  *
  * The progress thread is the sole caller of all DOCA APIs (doca_pe_progress,
- * doca_kv_task_alloc_init, doca_task_submit, etc.).
+ * doca_kvdev_io_task_*_alloc_init, doca_task_submit, etc.).
  *
  * Producers (postXfer, cancelRequest) append to *producerVec_ and to
  * cancelledRequests_ under queueMutex_ and set hasNewWork_. The progress thread,
@@ -170,7 +173,7 @@ private:
  */
 class nixlThreadedProgressEngine : public nixlDocaMemosProgressEngine {
 public:
-    nixlThreadedProgressEngine(struct doca_kvdev *kvdev,
+    nixlThreadedProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev,
                                uint32_t num_tasks,
                                std::chrono::microseconds thread_delay);
     ~nixlThreadedProgressEngine() override;

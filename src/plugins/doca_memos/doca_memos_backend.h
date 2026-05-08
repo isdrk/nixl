@@ -44,7 +44,7 @@ class nixlBackendInitParams;
 // (or convertToMemosKey()) before handing the key to any DOCA API.
 struct docaMemosKey {
     uint8_t key[DOCA_MEMOS_MAX_OBJECT_KEY_LEN] = {};
-    uint32_t keyLen = 0;
+    uint16_t keyLen = 0;
 };
 
 std::ostream &
@@ -228,15 +228,11 @@ private:
     struct doca_nvme_kernel_kvdev *nvmeKvdev_ = nullptr;
     std::unique_ptr<nixlDocaMemosProgressEngine> progressEngine_;
 
-    static constexpr const char *kDefaultSubnqn = "nqn.2025-10.nvda.doca";
     static constexpr const char *kDefaultNguid = "00000000000000000000000000000000";
     static constexpr uint32_t kDefaultNumTasks = 8192;
-    static constexpr uint16_t kDefaultNsId = 1;
 
     std::string deviceName_;
     uint32_t numTasks_ = kDefaultNumTasks;
-    std::string subnqn_ = kDefaultSubnqn;
-    uint16_t nsId_ = kDefaultNsId;
     std::string nguid_ = kDefaultNguid;
     bool queryMemAssumeSuccess_ = true;
     bool ignoreReadNotFound_ = false;

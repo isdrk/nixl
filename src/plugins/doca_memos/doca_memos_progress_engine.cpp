@@ -25,7 +25,10 @@
 
 // DOCA includes
 #include <doca_pe.h>
-#include <doca_kv.h>
+#include <doca_kvdev.h>
+#include <doca_kvdev_io.h>
+#include <doca_nvme_kernel_kvdev.h>
+#include <doca_nvme_kernel_kvdev_io.h>
 #include <doca_ctx.h>
 #include <doca_error.h>
 
@@ -47,7 +50,7 @@ nixlDocaMemosProgressEngine::handleSubmissionFailure(nixlDocaMemosBackendReqH *r
 }
 
 void
-nixlDocaMemosProgressEngine::taskCompletionCallback(doca_kv_task *task,
+nixlDocaMemosProgressEngine::taskCompletionCallback(struct doca_task *task,
                                                     union doca_data task_user_data,
                                                     union doca_data ctx_user_data) {
     (void)ctx_user_data;
@@ -76,21 +79,12 @@ nixlDocaMemosProgressEngine::taskCompletionCallback(doca_kv_task *task,
             }
             req_h->allTasksCompleted_.store(true, std::memory_order_release);
         }
-
-        struct doca_task *doca_task = doca_kv_task_as_task(task);
-        if (doca_task) {
-            doca_task_free(doca_task);
-        }
-        return;
     }
-    struct doca_task *doca_task = doca_kv_task_as_task(task);
-    if (doca_task) {
-        doca_task_free(doca_task);
-    }
+    doca_task_free(task);
 }
 
 void
-nixlDocaMemosProgressEngine::taskErrorCallback(doca_kv_task *task,
+nixlDocaMemosProgressEngine::taskErrorCallback(struct doca_task *task,
                                                union doca_data task_user_data,
                                                union doca_data ctx_user_data) {
     (void)ctx_user_data;
@@ -103,7 +97,7 @@ nixlDocaMemosProgressEngine::taskErrorCallback(doca_kv_task *task,
         bool is_cancelled = req_h->cancelled_.load(std::memory_order_relaxed);
 
         if (!is_cancelled) {
-            doca_error_t task_err = doca_task_get_status(doca_kv_task_as_task(task));
+            doca_error_t task_err = doca_task_get_status(task);
 
             if (req_h->isExistQuery_) {
                 // The DOCA EXIST task always completes via the error callback:
@@ -147,41 +141,60 @@ nixlDocaMemosProgressEngine::taskErrorCallback(doca_kv_task *task,
             }
             req_h->allTasksCompleted_.store(true, std::memory_order_release);
         }
-
-        struct doca_task *doca_task = doca_kv_task_as_task(task);
-        if (doca_task) {
-            doca_task_free(doca_task);
-        }
-        return;
     }
-    struct doca_task *doca_task = doca_kv_task_as_task(task);
-    if (doca_task) {
-        doca_task_free(doca_task);
-    }
+    doca_task_free(task);
 }
 
-nixlDocaMemosProgressEngine::nixlDocaMemosProgressEngine(struct doca_kvdev *kvdev, uint32_t num_tasks) {
+nixlDocaMemosProgressEngine::nixlDocaMemosProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev,
+                                                         uint32_t num_tasks) {
     doca_error_t result;
 
     result = doca_pe_create(&pe_);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to create DOCA progress engine: " << result;
+        NIXL_ERROR << "Failed to create DOCA progress engine: " << doca_error_get_descr(result);
         initErr_ = true;
         return;
     }
 
-    result = doca_kvdev_io_create(kvdev, &kvIo_);
+    result = doca_nvme_kernel_kvdev_io_create(nvme_kvdev, &kkvIo_);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to create DOCA KV IO context: " << result;
+        NIXL_ERROR << "Failed to create DOCA NVMe kernel KV IO context: "
+                   << doca_error_get_descr(result);
         cleanupDocaResources();
         initErr_ = true;
         return;
     }
 
-    result =
-        doca_kvdev_io_set_conf(kvIo_, num_tasks, taskCompletionCallback, taskErrorCallback);
+    kvIo_ = doca_nvme_kernel_kvdev_io_as_kvdev_io(kkvIo_);
+    if (!kvIo_) {
+        NIXL_ERROR << "Failed to convert NVMe kernel KV IO context to generic KV IO context";
+        cleanupDocaResources();
+        initErr_ = true;
+        return;
+    }
+
+    result = doca_kvdev_io_set_num_tasks(kvIo_, num_tasks);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to configure DOCA KV IO context: " << result;
+        NIXL_ERROR << "Failed to set DOCA KV IO task count: "
+                   << doca_error_get_descr(result);
+        cleanupDocaResources();
+        initErr_ = true;
+        return;
+    }
+
+    result = doca_kvdev_io_set_task_completion_cb(kvIo_, taskCompletionCallback);
+    if (result != DOCA_SUCCESS) {
+        NIXL_ERROR << "Failed to set DOCA KV IO completion callback: "
+                   << doca_error_get_descr(result);
+        cleanupDocaResources();
+        initErr_ = true;
+        return;
+    }
+
+    result = doca_kvdev_io_set_task_error_cb(kvIo_, taskErrorCallback);
+    if (result != DOCA_SUCCESS) {
+        NIXL_ERROR << "Failed to set DOCA KV IO error callback: "
+                   << doca_error_get_descr(result);
         cleanupDocaResources();
         initErr_ = true;
         return;
@@ -197,7 +210,8 @@ nixlDocaMemosProgressEngine::nixlDocaMemosProgressEngine(struct doca_kvdev *kvde
 
     result = doca_pe_connect_ctx(pe_, ctx_);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to connect context to progress engine: " << result;
+        NIXL_ERROR << "Failed to connect context to progress engine: "
+                   << doca_error_get_descr(result);
         cleanupDocaResources();
         initErr_ = true;
         return;
@@ -205,7 +219,7 @@ nixlDocaMemosProgressEngine::nixlDocaMemosProgressEngine(struct doca_kvdev *kvde
 
     result = doca_ctx_start(ctx_);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to start DOCA context: " << result;
+        NIXL_ERROR << "Failed to start DOCA context: " << doca_error_get_descr(result);
         cleanupDocaResources();
         initErr_ = true;
         return;
@@ -225,11 +239,13 @@ nixlDocaMemosProgressEngine::cleanupDocaResources() {
         ctx_ = nullptr;
     }
 
-    if (kvIo_) {
-        result = doca_kvdev_io_destroy(kvIo_);
+    if (kkvIo_) {
+        result = doca_nvme_kernel_kvdev_io_destroy(kkvIo_);
         if (result != DOCA_SUCCESS) {
-            NIXL_WARN << "Failed to destroy DOCA KV IO context: " << doca_error_get_descr(result);
+            NIXL_WARN << "Failed to destroy DOCA NVMe kernel KV IO context: "
+                      << doca_error_get_descr(result);
         }
+        kkvIo_ = nullptr;
         kvIo_ = nullptr;
     }
 
@@ -269,60 +285,74 @@ nixlDocaMemosProgressEngine::trySubmitRequest(nixlDocaMemosBackendReqH *req_h,
     for (int i = req_h->nextDescriptorIndex_; i < local.descCount(); i++) {
         const docaMemosKey &object_key = req_h->objectKeys_[i];
 
-        doca_kv_task *task = nullptr;
-        doca_error_t result = doca_kv_task_alloc_init(kvIo_, &task);
-        if (result != DOCA_SUCCESS) {
-            if (result == DOCA_ERROR_FULL || result == DOCA_ERROR_NO_MEMORY) {
-                req_h->nextDescriptorIndex_ = i;
-                NIXL_DEBUG << "Task pool exhausted at descriptor " << i << ", queueing for retry";
-                return false;
-            }
-            NIXL_ERROR << "Failed to allocate DOCA KV task: " << doca_error_get_descr(result);
-            handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
-            return true;
-        }
-
         auto *task_ctx = &req_h->taskContexts_[i];
         task_ctx->reqH = req_h;
         task_ctx->taskIndex = i;
         union doca_data task_user_data = {.ptr = task_ctx};
 
-        if (operation == NIXL_WRITE) {
-            result = doca_kv_task_store_set_conf(task,
-                                                 task_user_data,
-                                                 object_key.key,
-                                                 object_key.keyLen,
-                                                 &req_h->valueIovecs_[i],
-                                                 1);
-        } else { // NIXL_READ
-            result = doca_kv_task_retrieve_set_conf(task,
-                                                    task_user_data,
-                                                    object_key.key,
-                                                    object_key.keyLen,
-                                                    &req_h->valueIovecs_[i],
-                                                    1);
-        }
+        struct doca_task *doca_task = nullptr;
+        doca_error_t result;
 
-        if (result != DOCA_SUCCESS) {
-            NIXL_ERROR << "Failed to configure task: " << doca_error_get_descr(result);
-            doca_task_free(doca_kv_task_as_task(task));
-            handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
-            return true;
+        if (operation == NIXL_WRITE) {
+            struct doca_kvdev_io_task_store *store_task = nullptr;
+            result = doca_kvdev_io_task_store_alloc_init(kvIo_, task_user_data, &store_task);
+            if (result != DOCA_SUCCESS) {
+                if (result == DOCA_ERROR_FULL || result == DOCA_ERROR_NO_MEMORY) {
+                    req_h->nextDescriptorIndex_ = i;
+                    NIXL_DEBUG << "Task pool exhausted at descriptor " << i
+                               << ", queueing for retry";
+                    return false;
+                }
+                NIXL_ERROR << "Failed to allocate DOCA KV store task: "
+                           << doca_error_get_descr(result);
+                handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
+                return true;
+            }
+            doca_kvdev_io_task_store_set_key_value_conf(store_task,
+                                                       object_key.key,
+                                                       object_key.keyLen,
+                                                       &req_h->valueIovecs_[i],
+                                                       1,
+                                                       req_h->valueIovecs_[i].iov_len);
+            doca_task = doca_kvdev_io_task_store_as_task(store_task);
+        } else { // NIXL_READ
+            struct doca_kvdev_io_task_retrieve *retrieve_task = nullptr;
+            result =
+                doca_kvdev_io_task_retrieve_alloc_init(kvIo_, task_user_data, &retrieve_task);
+            if (result != DOCA_SUCCESS) {
+                if (result == DOCA_ERROR_FULL || result == DOCA_ERROR_NO_MEMORY) {
+                    req_h->nextDescriptorIndex_ = i;
+                    NIXL_DEBUG << "Task pool exhausted at descriptor " << i
+                               << ", queueing for retry";
+                    return false;
+                }
+                NIXL_ERROR << "Failed to allocate DOCA KV retrieve task: "
+                           << doca_error_get_descr(result);
+                handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
+                return true;
+            }
+            doca_kvdev_io_task_retrieve_set_key_value_conf(retrieve_task,
+                                                          object_key.key,
+                                                          object_key.keyLen,
+                                                          &req_h->valueIovecs_[i],
+                                                          1,
+                                                          req_h->valueIovecs_[i].iov_len);
+            doca_task = doca_kvdev_io_task_retrieve_as_task(retrieve_task);
         }
 
         // Bump submittedTasks_ only after a successful submit, so the count
         // stays authoritative even if doca_task_submit invokes the callback
         // synchronously on failure.
-        result = doca_task_submit(doca_kv_task_as_task(task));
+        result = doca_task_submit(doca_task);
         if (result != DOCA_SUCCESS) {
             if (result == DOCA_ERROR_FULL) {
-                doca_task_free(doca_kv_task_as_task(task));
+                doca_task_free(doca_task);
                 req_h->nextDescriptorIndex_ = i;
                 NIXL_DEBUG << "Task queue full at descriptor " << i << ", queueing for retry";
                 return false;
             }
             NIXL_ERROR << "Failed to submit task: " << doca_error_get_descr(result);
-            doca_task_free(doca_kv_task_as_task(task));
+            doca_task_free(doca_task);
             handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
             return true;
         }
@@ -518,8 +548,9 @@ nixlDocaMemosProgressEngine::collectQueryResults(
     return successful_queries;
 }
 
-nixlNoThreadProgressEngine::nixlNoThreadProgressEngine(struct doca_kvdev *kvdev, uint32_t num_tasks)
-    : nixlDocaMemosProgressEngine(kvdev, num_tasks) {
+nixlNoThreadProgressEngine::nixlNoThreadProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev,
+                                                       uint32_t num_tasks)
+    : nixlDocaMemosProgressEngine(nvme_kvdev, num_tasks) {
     if (initErr_) {
         return;
     }
@@ -669,10 +700,10 @@ nixlThreadedProgressEngine::cancelRequest(nixlDocaMemosBackendReqH *req_h) const
     wakeup_.notify_one();
 }
 
-nixlThreadedProgressEngine::nixlThreadedProgressEngine(struct doca_kvdev *kvdev,
+nixlThreadedProgressEngine::nixlThreadedProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev,
                                                        uint32_t num_tasks,
                                                        std::chrono::microseconds thread_delay)
-    : nixlDocaMemosProgressEngine(kvdev, num_tasks),
+    : nixlDocaMemosProgressEngine(nvme_kvdev, num_tasks),
       threadDelay_(thread_delay) {
     if (initErr_) {
         return;
@@ -745,38 +776,34 @@ nixlDocaMemosProgressEngine::trySubmitExistTask(nixlDocaMemosBackendReqH *req_h)
 
     const docaMemosKey &key = req_h->objectKeys_[0];
 
-    doca_kv_task *task = nullptr;
-    doca_error_t result = doca_kv_task_alloc_init(kvIo_, &task);
-    if (result != DOCA_SUCCESS) {
-        if (result == DOCA_ERROR_FULL || result == DOCA_ERROR_NO_MEMORY) {
-            return false;
-        }
-        NIXL_ERROR << "Failed to allocate DOCA KV task for query: " << doca_error_get_descr(result);
-        handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
-        return true;
-    }
-
     auto *task_ctx = &req_h->taskContexts_[0];
     task_ctx->reqH = req_h;
     task_ctx->taskIndex = 0;
     union doca_data task_user_data = {.ptr = task_ctx};
 
-    result = doca_kv_task_exist_set_conf(task, task_user_data, key.key, key.keyLen);
+    struct doca_kvdev_io_task_exist *exist_task = nullptr;
+    doca_error_t result =
+        doca_kvdev_io_task_exist_alloc_init(kvIo_, task_user_data, &exist_task);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to configure EXIST task: " << doca_error_get_descr(result);
-        doca_task_free(doca_kv_task_as_task(task));
+        if (result == DOCA_ERROR_FULL || result == DOCA_ERROR_NO_MEMORY) {
+            return false;
+        }
+        NIXL_ERROR << "Failed to allocate DOCA KV exist task: " << doca_error_get_descr(result);
         handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
         return true;
     }
 
-    result = doca_task_submit(doca_kv_task_as_task(task));
+    doca_kvdev_io_task_exist_set_key_conf(exist_task, key.key, key.keyLen);
+    struct doca_task *doca_task = doca_kvdev_io_task_exist_as_task(exist_task);
+
+    result = doca_task_submit(doca_task);
     if (result != DOCA_SUCCESS) {
         if (result == DOCA_ERROR_FULL) {
-            doca_task_free(doca_kv_task_as_task(task));
+            doca_task_free(doca_task);
             return false;
         }
         NIXL_ERROR << "Failed to submit EXIST task: " << doca_error_get_descr(result);
-        doca_task_free(doca_kv_task_as_task(task));
+        doca_task_free(doca_task);
         handleSubmissionFailure(req_h, NIXL_ERR_BACKEND);
         return true;
     }

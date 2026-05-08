@@ -29,7 +29,7 @@
 #include <cstring>
 
 // DOCA headers
-#include <doca_kv.h>
+#include <doca_kvdev.h>
 #include <doca_nvme_kernel_kvdev.h>
 #include <doca_pe.h>
 #include <doca_ctx.h>
@@ -105,10 +105,16 @@ void
 nixlDocaMemosEngine::cleanupDocaResources() {
     doca_error_t result;
 
+    // doca_kvdev_stop() is only valid on a started device. _set_nguid() /
+    // _set_path() failures during init leave the device in the unstarted
+    // state, so guard with a started check rather than blindly stopping.
     if (kvdev_) {
-        result = doca_kvdev_stop(kvdev_);
-        if (result != DOCA_SUCCESS) {
-            NIXL_WARN << "Failed to stop DOCA KV device: " << doca_error_get_descr(result);
+        uint8_t started = 0;
+        if (doca_kvdev_is_started(kvdev_, &started) == DOCA_SUCCESS && started) {
+            result = doca_kvdev_stop(kvdev_);
+            if (result != DOCA_SUCCESS) {
+                NIXL_WARN << "Failed to stop DOCA KV device: " << doca_error_get_descr(result);
+            }
         }
         kvdev_ = nullptr;
     }
@@ -145,22 +151,6 @@ nixlDocaMemosEngine::parseInitParams(const nixl_b_params_t *params) {
         }
     }
 
-    it = params->find("subnqn");
-    if (it != params->end()) {
-        subnqn_ = it->second;
-    }
-
-    it = params->find("ns_id");
-    if (it != params->end()) {
-        try {
-            nsId_ = static_cast<uint16_t>(std::stoul(it->second));
-        }
-        catch (...) {
-            NIXL_ERROR << "Failed to parse ns_id parameter";
-            return NIXL_ERR_INVALID_PARAM;
-        }
-    }
-
     it = params->find("nguid");
     if (it != params->end()) {
         nguid_ = it->second;
@@ -192,11 +182,6 @@ nixlDocaMemosEngine::parseInitParams(const nixl_b_params_t *params) {
         }
     }
 
-    // Site-specific defaults picked up silently are a common source of
-    // cross-lab confusion; surface them loudly so the user can override.
-    if (!params->count("subnqn")) {
-        NIXL_WARN << "Using default subnqn '" << subnqn_ << "'; set 'subnqn' to override";
-    }
     if (!params->count("nguid")) {
         NIXL_WARN << "Using default nguid (all zeros); set 'nguid' to override";
     }
@@ -204,72 +189,49 @@ nixlDocaMemosEngine::parseInitParams(const nixl_b_params_t *params) {
     return NIXL_SUCCESS;
 }
 
-namespace {
-
-// strncpy into a zero-initialised buffer requires size+1 headroom to guarantee
-// termination; fail loudly if the caller exceeds that instead of silently
-// truncating.
-nixl_status_t
-copyBounded(char *dst, size_t dst_capacity, const std::string &src, const char *what) {
-    if (src.size() >= dst_capacity) {
-        NIXL_ERROR << what << " too long (" << src.size() << " >= " << dst_capacity << ")";
-        return NIXL_ERR_INVALID_PARAM;
-    }
-    std::memcpy(dst, src.data(), src.size());
-    dst[src.size()] = '\0';
-    return NIXL_SUCCESS;
-}
-
-} // namespace
-
 nixl_status_t
 nixlDocaMemosEngine::initDocaDevice() {
-    char device_name[DOCA_KVDEV_NAME_LEN] = {0};
-    uint8_t device_guid[DOCA_KVDEV_GUID_LEN] = {0};
-
-    nixl_status_t status = copyBounded(device_name, DOCA_KVDEV_NAME_LEN, deviceName_, "device_name");
-    if (status != NIXL_SUCCESS) {
-        return status;
-    }
-
-    doca_error_t result = doca_nvme_kernel_kvdev_create(device_name, device_guid, &nvmeKvdev_);
+    uint32_t max_path_len = 0;
+    doca_error_t result = doca_nvme_kernel_kvdev_cap_get_max_path_len(&max_path_len);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to create DOCA NVMe kernel KV device: " << result;
+        NIXL_ERROR << "doca_nvme_kernel_kvdev_cap_get_max_path_len failed: "
+                   << doca_error_get_descr(result);
         return NIXL_ERR_BACKEND;
     }
-
-    char subnqn[DOCA_NVME_KERNEL_KVDEV_SUBNQN_LEN] = {0};
-    status = copyBounded(subnqn, DOCA_NVME_KERNEL_KVDEV_SUBNQN_LEN, subnqn_, "subnqn");
-    if (status != NIXL_SUCCESS) {
-        cleanupDocaResources();
-        return status;
+    if (deviceName_.size() + 1 > max_path_len) {
+        NIXL_ERROR << "device_name length " << deviceName_.size()
+                   << " exceeds device-reported max " << (max_path_len - 1);
+        return NIXL_ERR_INVALID_PARAM;
     }
 
-    uint8_t ns_guid[DOCA_KVDEV_GUID_LEN] = {0};
-    if (nguid_.length() == 32) {
-        bool parse_ok = true;
-        for (size_t i = 0; i < DOCA_KVDEV_GUID_LEN; i++) {
+    uint8_t nguid_bytes[DOCA_KVDEV_NGUID_LEN] = {0};
+    if (!nguid_.empty()) {
+        if (nguid_.length() != 32) {
+            NIXL_ERROR << "Invalid nguid '" << nguid_ << "' (expected 32 hex chars)";
+            return NIXL_ERR_INVALID_PARAM;
+        }
+        for (size_t i = 0; i < DOCA_KVDEV_NGUID_LEN; i++) {
             unsigned val = 0;
             const char *first = nguid_.data() + i * 2;
             auto [ptr, ec] = std::from_chars(first, first + 2, val, 16);
             if (ec != std::errc{} || ptr != first + 2) {
-                parse_ok = false;
-                break;
+                NIXL_ERROR << "Invalid nguid '" << nguid_ << "' (expected 32 hex chars)";
+                return NIXL_ERR_INVALID_PARAM;
             }
-            ns_guid[i] = static_cast<uint8_t>(val);
+            nguid_bytes[i] = static_cast<uint8_t>(val);
         }
-        if (!parse_ok) {
-            NIXL_ERROR << "Invalid nguid '" << nguid_ << "' (expected 32 hex chars)";
-            cleanupDocaResources();
-            return NIXL_ERR_INVALID_PARAM;
-        }
-    } else {
-        NIXL_WARN << "Invalid nguid '" << nguid_ << "' (expected 32 hex chars), using all zeros";
     }
 
-    result = doca_nvme_kernel_kvdev_add_ns(nvmeKvdev_, subnqn, nsId_, ns_guid);
+    result = doca_nvme_kernel_kvdev_create(&nvmeKvdev_);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to add NVMe namespace to kernel KV device: "
+        NIXL_ERROR << "Failed to create DOCA NVMe kernel KV device: "
+                   << doca_error_get_descr(result);
+        return NIXL_ERR_BACKEND;
+    }
+
+    result = doca_nvme_kernel_kvdev_set_path(nvmeKvdev_, deviceName_.c_str());
+    if (result != DOCA_SUCCESS) {
+        NIXL_ERROR << "Failed to set NVMe kernel KV device path: "
                    << doca_error_get_descr(result);
         cleanupDocaResources();
         return NIXL_ERR_BACKEND;
@@ -282,9 +244,16 @@ nixlDocaMemosEngine::initDocaDevice() {
         return NIXL_ERR_BACKEND;
     }
 
+    result = doca_kvdev_set_nguid(kvdev_, nguid_bytes);
+    if (result != DOCA_SUCCESS) {
+        NIXL_ERROR << "Failed to set DOCA KV device NGUID: " << doca_error_get_descr(result);
+        cleanupDocaResources();
+        return NIXL_ERR_BACKEND;
+    }
+
     result = doca_kvdev_start(kvdev_);
     if (result != DOCA_SUCCESS) {
-        NIXL_ERROR << "Failed to start DOCA KV device: " << result;
+        NIXL_ERROR << "Failed to start DOCA KV device: " << doca_error_get_descr(result);
         cleanupDocaResources();
         return NIXL_ERR_BACKEND;
     }
@@ -331,9 +300,10 @@ nixlDocaMemosEngine::createProgressEngine(const nixlBackendInitParams *init_para
                 NIXL_WARN << "Progress-thread delay is 0us; thread will busy-spin";
             }
             progressEngine_ = std::make_unique<nixlThreadedProgressEngine>(
-                kvdev_, numTasks_, std::chrono::microseconds(init_params->pthrDelay));
+                nvmeKvdev_, numTasks_, std::chrono::microseconds(init_params->pthrDelay));
         } else {
-            progressEngine_ = std::make_unique<nixlNoThreadProgressEngine>(kvdev_, numTasks_);
+            progressEngine_ =
+                std::make_unique<nixlNoThreadProgressEngine>(nvmeKvdev_, numTasks_);
         }
     }
     catch (const std::exception &e) {
@@ -367,8 +337,7 @@ nixlDocaMemosEngine::nixlDocaMemosEngine(const nixlBackendInitParams *init_param
     }
 
     NIXL_INFO << "Initializing DOCA KV with device_name=" << deviceName_
-              << ", num_tasks=" << numTasks_ << ", subnqn=" << subnqn_ << ", ns_id=" << nsId_
-              << ", nguid=" << nguid_
+              << ", num_tasks=" << numTasks_ << ", nguid=" << nguid_
               << ", query_mem_mode=" << (queryMemAssumeSuccess_ ? "assume_success" : "actual")
               << ", ignore_read_not_found=" << (ignoreReadNotFound_ ? "true" : "false");
 
