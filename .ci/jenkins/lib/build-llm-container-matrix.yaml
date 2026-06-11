@@ -4,7 +4,7 @@
 # pre-built NIXL wheel set.
 #
 #   - vllm-nixl-<ver>         : Dockerfile.vllm   + vllm/vllm-openai:latest
-#   - vllm-cu12-nixl-<ver>    : Dockerfile.vllm   + vllm/vllm-openai:v0.22.1-cu129
+#   - vllm-cu12-nixl-<ver>    : Dockerfile.vllm   + vllm/vllm-openai:latest-cu129
 #   - sglang-nixl-<ver>       : Dockerfile.sglang + lmsysorg/sglang:latest
 #   - sglang-cu13-nixl-<ver>  : Dockerfile.sglang + lmsysorg/sglang:latest-cu130-runtime
 #
@@ -208,7 +208,7 @@ steps:
         *)       echo "Unsupported arch: ${arch}"; exit 1 ;;
       esac
       IMAGE="${ARTIFACTORY_REGISTRY_URL}/vllm-cu12-nixl:${IMAGE_TAG}-${arch}"
-      BASE="${BASE_IMAGE_VLLM_CU12:-docker.io/vllm/vllm-openai:v0.22.1-cu129}"
+      BASE="${BASE_IMAGE_VLLM_CU12:-docker.io/vllm/vllm-openai:latest-cu129}"
       podman build \
         --platform "${PLATFORM}" \
         --build-arg "BASE_IMAGE=${BASE}" \

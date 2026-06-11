@@ -568,7 +568,7 @@
           default: ""
           description: >
             Optional override for the vllm-cu12 base image build-arg.<br/>
-            Leave empty to use upstream <code>docker.io/vllm/vllm-openai:v0.22.1-cu129</code> (rc0 default).<br/>
+            Leave empty to use upstream <code>docker.io/vllm/vllm-openai:latest-cu129</code> (rc0 default).<br/>
             For <b>rcN, N&gt;0</b> pin to the rc0 vllm-cu12 image.
       - string:
           name: "BASE_IMAGE_SGLANG"
